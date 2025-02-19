@@ -1,0 +1,1224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Pulsar-23 Inspired Drum Machine (Extended Prototype)</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: sans-serif;
+      background-color: #121212;
+      color: #f2f2f2;
+    }
+    h1, h2, h3, h4 {
+      text-align: center;
+      margin: 0.5em 0;
+    }
+    .container {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      padding: 10px;
+    }
+    .module {
+      border: 2px solid #555;
+      border-radius: 6px;
+      margin: 10px;
+      padding: 10px;
+      min-width: 320px;
+      background: #1d1d1d;
+    }
+    label {
+      display: block;
+      margin: 5px 0;
+      font-size: 0.9em;
+    }
+    .step-grid {
+      display: grid;
+      gap: 2px;
+      grid-template-columns: repeat(16, 1fr);
+      margin-top: 5px;
+    }
+    .step {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      background-color: #333;
+      border-radius: 3px;
+      padding: 2px;
+      font-size: 10px;
+    }
+    .step input[type="checkbox"] {
+      margin: 0;
+    }
+    button {
+      cursor: pointer;
+      background-color: #555;
+      color: white;
+      padding: 6px 10px;
+      border: none;
+      border-radius: 4px;
+      margin-right: 4px;
+    }
+    button:hover {
+      background-color: #777;
+    }
+    .param-section, .lfo-section, .fx-section, .track-controls {
+      border-top: 1px solid #444;
+      margin-top: 10px;
+      padding-top: 10px;
+    }
+    .track-controls button {
+      margin: 0 4px 4px 0;
+    }
+    .crossfader-module {
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <h1>Pulsar-23 Inspired Drum Machine (Extended Prototype)</h1>
+
+  <div class="container">
+    <!-- Master / Transport / Scale -->
+    <div class="module">
+      <h2>Master & Transport</h2>
+      <label>Tempo (BPM):
+        <input type="range" min="20" max="300" value="120" id="tempoSlider">
+        <span id="tempoValue">120</span>
+      </label>
+      <button id="startStopBtn">Start</button>
+      <label>Master Volume
+        <input type="range" min="0" max="1" step="0.01" value="0.8" id="masterVolume">
+      </label>
+      <label>Swing
+        <input type="range" min="0" max="1" step="0.01" value="0" id="swingSlider">
+        <span id="swingValue">0</span>
+      </label>
+      <div style="border-top:1px solid #444; margin-top:10px; padding-top:10px;">
+        <h4>Global Key & Scale</h4>
+        <label>Root Note:
+          <select id="rootNoteSelect"></select>
+        </label>
+        <label>Scale Type:
+          <select id="scaleTypeSelect"></select>
+        </label>
+      </div>
+    </div>
+
+    <!-- 4 Track Modules -->
+    <div id="trackContainer"></div>
+
+    <!-- Master FX Chain -->
+    <div class="module">
+      <h2>Master FX Chain</h2>
+      <div class="fx-section">
+        <label>Distortion Amount
+          <input type="range" id="distortionAmount" min="0" max="1" step="0.01" value="0.3">
+        </label>
+        <label>Delay Time
+          <input type="range" id="delayTime" min="0" max="1" step="0.01" value="0.3">
+        </label>
+        <label>Delay Feedback
+          <input type="range" id="delayFeedback" min="0" max="0.95" step="0.01" value="0.4">
+        </label>
+        <label>Spectral Filter (Freq)
+          <input type="range" id="spectralFreq" min="100" max="8000" step="1" value="2000">
+        </label>
+      </div>
+    </div>
+
+    <!-- Crossfader for Track Params -->
+    <div class="module crossfader-module">
+      <h2>Crossfader: Track Params</h2>
+      <button id="randomStateBtn">Generate Random Track State</button>
+      <label style="display:block; margin-top:10px;">
+        Crossfade
+        <input type="range" id="crossfadeSlider" min="0" max="1" step="0.01" value="0">
+      </label>
+      <p style="font-size:0.8em;">
+        0 = Entirely user-defined • 1 = Entirely random
+      </p>
+    </div>
+
+    <!-- Crossfader for FX Params -->
+    <div class="module crossfader-module">
+      <h2>Crossfader: FX Params</h2>
+      <button id="randomFXStateBtn">Generate Random FX State</button>
+      <label style="display:block; margin-top:10px;">
+        Crossfade
+        <input type="range" id="fxCrossfadeSlider" min="0" max="1" step="0.01" value="0">
+      </label>
+      <p style="font-size:0.8em;">
+        0 = Entirely user-defined • 1 = Entirely random
+      </p>
+    </div>
+
+  </div>
+
+  <script>
+    /******************************************************
+     * GLOBALS & AUDIO SETUP
+     ******************************************************/
+    let audioCtx = null;
+    let isPlaying = false;
+    let bpm = 120;
+    let swing = 0;    // 0..1
+    let current16th = 0;
+    let nextNoteTime = 0;
+    let lookahead = 25.0;
+    let scheduleAheadTime = 0.1;
+    let intervalID = null;
+
+    // Master
+    let masterGain;
+    let distortionNode;
+    let delayNode;
+    let delayFeedbackGain;
+    let spectralFilter;
+
+    // Scale
+    let scaleRoot = 0;  // C = 0
+    let scaleType = "Major";
+    const NOTE_NAMES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+    const SCALE_PATTERNS = {
+      Major:    [0,2,4,5,7,9,11],
+      Minor:    [0,2,3,5,7,8,10],
+      Pentatonic: [0,2,4,7,9]
+      // Add more if desired
+    };
+
+    // 4 Tracks
+    const tracks = [];
+
+    // For crossfading track params
+    let userState = null;
+    let randomState = null;
+
+    // For crossfading FX
+    let userFXState = null;
+    let randomFXState = null;
+
+    /******************************************************
+     * TRACK TYPES (with hi-hat improvements)
+     ******************************************************/
+    const TRACK_TYPES = {
+      BD: {
+        pitch: 50,
+        timbre: 30,
+        attack: 0.01,
+        decay: 0.1,
+        sustain: 0.5,
+        release: 0.4,
+        filterFreq: 800,
+        filterRes: 1,
+        generator: "bd"
+      },
+      Bass: {
+        pitch: 60,
+        timbre: 50,
+        attack: 0.01,
+        decay: 0.2,
+        sustain: 0.7,
+        release: 0.5,
+        filterFreq: 600,
+        filterRes: 1,
+        generator: "bass"
+      },
+      Snare: {
+        pitch: 80,
+        timbre: 70,
+        attack: 0.01,
+        decay: 0.1,
+        sustain: 0.3,
+        release: 0.4,
+        filterFreq: 3500,
+        filterRes: 1,
+        generator: "snare"
+      },
+      Hihat: {
+        // We'll do a metallic/noise approach
+        pitch: 90,
+        timbre: 60, // "metallic factor"
+        attack: 0.002,
+        decay: 0.05,
+        sustain: 0.2,
+        release: 0.1,
+        filterFreq: 7000,
+        filterRes: 8,
+        generator: "hihat"
+      }
+    };
+
+    /******************************************************
+     * TRACK OBJECT
+     ******************************************************/
+    function createTrack(id){
+      return {
+        id,
+        type: "BD",
+        ...JSON.parse(JSON.stringify(TRACK_TYPES.BD)),
+
+        stepLength: 16,
+        steps: [],
+
+        passCount: 0,
+        lfoOn: false,
+        lfoFreq: 2,
+        lfoDepth: 0.2,
+        lfoTarget: "pitch",
+        lfoType: "sine",
+        lfoNode: null,
+        lfoGainNode: null,
+        _lfoPhase: 0,
+        // For random (sample & hold) LFO, we'll store a "holdVal"
+        _lfoHoldVal: 0,
+        _lfoNextHoldTime: 0,
+
+        // Mute / Solo
+        muted: false,
+        solo: false,
+        // For track-level volume node
+        trackGainNode: null
+      };
+    }
+
+    /******************************************************
+     * INITIALIZE AUDIO
+     ******************************************************/
+    function initAudio(){
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      masterGain = audioCtx.createGain();
+      masterGain.gain.value = 0.8;
+      masterGain.connect(audioCtx.destination);
+
+      distortionNode = audioCtx.createWaveShaper();
+      setDistortionCurve(0.3);
+
+      delayNode = audioCtx.createDelay(2.0);
+      delayNode.delayTime.value = 0.3;
+      delayFeedbackGain = audioCtx.createGain();
+      delayFeedbackGain.gain.value = 0.4;
+      delayNode.connect(delayFeedbackGain);
+      delayFeedbackGain.connect(delayNode);
+
+      spectralFilter = audioCtx.createBiquadFilter();
+      spectralFilter.type = "bandpass";
+      spectralFilter.frequency.value = 2000;
+
+      // chain -> distortion -> delay -> filter -> master
+      distortionNode.connect(delayNode);
+      delayNode.connect(spectralFilter);
+      spectralFilter.connect(masterGain);
+
+      // Each track gets its own trackGainNode, which feeds into distortion
+      // so we can handle mute/solo logic by controlling trackGainNode.
+      tracks.forEach(t => {
+        t.trackGainNode = audioCtx.createGain();
+        t.trackGainNode.gain.value = 1.0; 
+        // connect this trackGainNode to the distortion node (start of FX chain)
+        t.trackGainNode.connect(distortionNode);
+      });
+    }
+
+    function setDistortionCurve(amount){
+      if(!distortionNode) return;
+      let n_samples=256;
+      let curve=new Float32Array(n_samples);
+      for(let i=0;i<n_samples;i++){
+        let x=(i*2/n_samples)-1;
+        curve[i] = ((3+amount*20)*x*20*Math.PI)/(Math.PI+(amount*Math.abs(x)));
+      }
+      distortionNode.curve=curve;
+      distortionNode.oversample='4x';
+    }
+
+    /******************************************************
+     * SOUND GENERATION
+     ******************************************************/
+    function triggerSound(track, stepObj, time){
+      let {
+        generator, pitch, timbre,
+        attack, decay, sustain, release,
+        filterFreq, filterRes
+      }=track;
+
+      // Step volume
+      const stepVol = stepObj.stepVolume || 1.0;
+
+      // Create a filter node
+      let mainFilter=audioCtx.createBiquadFilter();
+      mainFilter.type="lowpass";
+      mainFilter.frequency.value=filterFreq;
+      mainFilter.Q.value=filterRes;
+
+      // Envelope
+      let envGain=audioCtx.createGain();
+      envGain.gain.setValueAtTime(0,time);
+
+      // ADSR
+      let peakTime=time+attack;
+      envGain.gain.linearRampToValueAtTime(stepVol, peakTime); // scaled by stepVol
+      envGain.gain.linearRampToValueAtTime(stepVol*sustain, peakTime+decay);
+      envGain.gain.setValueAtTime(stepVol*sustain, peakTime+decay);
+      envGain.gain.exponentialRampToValueAtTime(0.001, peakTime+decay+release);
+
+      // connect mainFilter -> envGain -> trackGainNode
+      mainFilter.connect(envGain);
+      envGain.connect(track.trackGainNode);
+
+      // final pitch
+      let finalPitch = pitch;
+      if(generator==="bass" && stepObj.stepPitch!==undefined){
+        finalPitch= stepObj.stepPitch;
+      } else if(generator==="bd" || generator==="snare") {
+        // quantize if LFO or something changed the pitch param
+        finalPitch = quantizePitch(finalPitch);
+      } else if(generator==="hihat"){
+        // We'll do a more advanced hi-hat approach:
+        // Combine metallic partials + noise? We'll base partial freq on finalPitch
+      }
+
+      if(generator==="bd" || generator==="bass"){
+        let osc = audioCtx.createOscillator();
+        osc.type="sine";
+        let baseFreq = freqFromMidiPitch( quantizePitch(finalPitch) );
+        let drop = (timbre/100)*40;
+        osc.frequency.setValueAtTime(baseFreq+drop,time);
+        osc.frequency.exponentialRampToValueAtTime(baseFreq,time+decay+release);
+        osc.connect(mainFilter);
+        osc.start(time);
+        osc.stop(time+attack+decay+release+0.5);
+      } else if(generator==="snare"){
+        // noise
+        let bufferSize=2*audioCtx.sampleRate;
+        let noiseBuffer=audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+        let data=noiseBuffer.getChannelData(0);
+        for(let i=0;i<bufferSize;i++){
+          data[i]=(Math.random()*2-1)*(timbre/100);
+        }
+        let noiseSource=audioCtx.createBufferSource();
+        noiseSource.buffer=noiseBuffer;
+        noiseSource.connect(mainFilter);
+        noiseSource.start(time);
+        noiseSource.stop(time+attack+decay+release+0.5);
+      } else if(generator==="hihat"){
+        // We'll do a simple "metallic partials + noise" approach:
+        // partial frequencies around finalPitch
+        let baseFreq = freqFromMidiPitch( quantizePitch(finalPitch) );
+
+        // 1) short metallic tone
+        let partialOsc=audioCtx.createOscillator();
+        partialOsc.type="square";
+        partialOsc.frequency.setValueAtTime(baseFreq + (timbre*2), time);
+        partialOsc.connect(mainFilter);
+        partialOsc.start(time);
+        partialOsc.stop(time+attack+decay+release+0.5);
+
+        // 2) short noise burst
+        let bufferSize=2*audioCtx.sampleRate;
+        let noiseBuffer=audioCtx.createBuffer(1,bufferSize,audioCtx.sampleRate);
+        let nd=noiseBuffer.getChannelData(0);
+        for(let i=0;i<bufferSize;i++){
+          nd[i]=(Math.random()*2-1)* (timbre/100);
+        }
+        let nSrc=audioCtx.createBufferSource();
+        nSrc.buffer=noiseBuffer;
+        nSrc.connect(mainFilter);
+        nSrc.start(time);
+        nSrc.stop(time+attack+decay+release+0.5);
+      }
+    }
+
+    function freqFromMidiPitch(midi){
+      return 440*Math.pow(2,(midi-69)/12);
+    }
+
+    /******************************************************
+     * PITCH QUANTIZATION
+     ******************************************************/
+    function quantizePitch(midiVal){
+      // If scaleRoot or scaleType is not set, just return midiVal
+      let root= scaleRoot; // 0..11
+      let pattern= SCALE_PATTERNS[scaleType] || [0,2,4,5,7,9,11];
+      // find noteInOct
+      let noteOct= Math.floor(midiVal/12);
+      let noteInOct = midiVal % 12;
+      // find closest scale tone
+      let best= pattern[0];
+      let minDiff=999;
+      pattern.forEach(n=>{
+        let diff=Math.abs( (noteInOct - root) - n);
+        if(diff<minDiff){
+          minDiff=diff;
+          best=n;
+        }
+      });
+      let newNoteInOct = best+root;
+      if(newNoteInOct>11){
+        noteOct++;
+        newNoteInOct-=12;
+      }
+      let finalMidi = noteOct*12 + newNoteInOct;
+      // clamp to 0..127
+      return clamp(finalMidi,0,127);
+    }
+
+    function clamp(v,minVal,maxVal){return Math.min(Math.max(v,minVal),maxVal);}
+
+    /******************************************************
+     * SCHEDULER
+     ******************************************************/
+    function scheduler(){
+      while(nextNoteTime < audioCtx.currentTime + scheduleAheadTime){
+        scheduleStep();
+        advanceStep();
+      }
+    }
+
+    function scheduleStep(){
+      // For each track
+      tracks.forEach(track=>{
+        let localStep= current16th % track.stepLength;
+        let stepObj= track.steps[localStep];
+        if(stepObj.on){
+          // Probability
+          if(Math.random()<stepObj.prob){
+            // Modulo
+            if(stepObj.moduloEnabled){
+              if( (track.passCount % stepObj.moduloCount) !== stepObj.moduloOffset){
+                return;
+              }
+            }
+            // Swing offset
+            let secondsPerBeat = 60/bpm;
+            let sixteenthTime = 0.25*secondsPerBeat;
+            let stepOffset=0;
+            if(localStep%2 === 1){
+              stepOffset = swing*0.5*sixteenthTime;
+            }
+            // Actually trigger
+            triggerSound(track, stepObj, nextNoteTime+stepOffset);
+          }
+        }
+      });
+    }
+
+    function advanceStep(){
+      let secondsPerBeat=60/bpm;
+      nextNoteTime += 0.25*secondsPerBeat;
+      tracks.forEach(track=>{
+        if( (current16th % track.stepLength)===(track.stepLength-1) ){
+          track.passCount++;
+        }
+      });
+      current16th = (current16th+1)%1024;
+    }
+
+    function startEngine(){
+      if(!audioCtx){
+        initAudio();
+        tracks.forEach(t=>initTrackLFO(t));
+      }
+      if(!isPlaying){
+        isPlaying=true;
+        current16th=0;
+        tracks.forEach(t=>t.passCount=0);
+        nextNoteTime=audioCtx.currentTime;
+        intervalID=setInterval(scheduler, lookahead);
+      }
+    }
+    function stopEngine(){
+      isPlaying=false;
+      clearInterval(intervalID);
+      intervalID=null;
+    }
+
+    /******************************************************
+     * PER TRACK LFO
+     * including random (S&H) wave
+     ******************************************************/
+    function initTrackLFO(track){
+      let lfoOsc = audioCtx.createOscillator();
+      lfoOsc.type= track.lfoType==="random"?"sine": track.lfoType; 
+      // if "random," we'll do the S&H logic in the setInterval
+      lfoOsc.frequency.value= track.lfoFreq;
+
+      let lfoGain= audioCtx.createGain();
+      lfoGain.gain.value= track.lfoDepth;
+
+      lfoOsc.connect(lfoGain);
+      lfoOsc.start();
+
+      track.lfoNode=lfoOsc;
+      track.lfoGainNode=lfoGain;
+      track._lfoPhase=0;
+      track._lfoHoldVal=0;
+      track._lfoNextHoldTime= audioCtx.currentTime;
+    }
+
+    // We'll run a setInterval to approximate LFO updates
+    setInterval(()=>{
+      if(!audioCtx||!isPlaying) return;
+      let dt=0.025;
+      let now= audioCtx.currentTime;
+      tracks.forEach(track=>{
+        if(!track.lfoOn) return;
+
+        if(track.lfoType==="random"){
+          // sample & hold
+          if(now>= track._lfoNextHoldTime){
+            // pick new random
+            track._lfoHoldVal= (Math.random()*2-1)* track.lfoDepth;
+            // next hold time
+            let period= 1/track.lfoFreq; // seconds
+            track._lfoNextHoldTime= now+ period;
+          }
+          applyLFOValue(track, track._lfoHoldVal);
+        } else {
+          // typical wave
+          track._lfoPhase += 2*Math.PI* track.lfoNode.frequency.value*dt;
+          let waveFunc;
+          switch(track.lfoType){
+            case "sine": waveFunc=Math.sin; break;
+            case "square": waveFunc=(x)=>(Math.sin(x)>=0?1:-1); break;
+            case "triangle": waveFunc=(x)=>2*Math.asin(Math.sin(x))/Math.PI; break;
+            case "sawtooth": waveFunc=(x)=>(x%(2*Math.PI))/Math.PI -1; break;
+            default: waveFunc=Math.sin; break;
+          }
+          let rawVal= waveFunc(track._lfoPhase);
+          let scaledVal= rawVal* track.lfoDepth;
+          applyLFOValue(track, scaledVal);
+        }
+      });
+    },25);
+
+    function applyLFOValue(track, val){
+      // apply to track param
+      switch(track.lfoTarget){
+        case "pitch": {
+          // The track's base pitch is from TRACK_TYPES, but let's do an offset
+          let base= TRACK_TYPES[track.type].pitch;
+          let newPitch= clamp(base+ val*12,0,127);
+          newPitch= quantizePitch(newPitch); // ensure scale
+          track.pitch= newPitch;
+          break;
+        }
+        case "timbre": {
+          let base= TRACK_TYPES[track.type].timbre;
+          track.timbre= clamp(base+ val*50,0,100);
+          break;
+        }
+        case "filter": {
+          let base= TRACK_TYPES[track.type].filterFreq;
+          track.filterFreq= clamp(base+ val*3000,50,10000);
+          break;
+        }
+        case "resonance":{
+          let base= TRACK_TYPES[track.type].filterRes;
+          track.filterRes= clamp(base+ val*10,0.1,20);
+          break;
+        }
+        case "attack":{
+          let base= TRACK_TYPES[track.type].attack;
+          track.attack= clamp(base+ val*0.1,0,1);
+          break;
+        }
+        case "decay":{
+          let base= TRACK_TYPES[track.type].decay;
+          track.decay= clamp(base+ val*0.5,0.01,2);
+          break;
+        }
+        case "sustain":{
+          let base= TRACK_TYPES[track.type].sustain;
+          track.sustain= clamp(base+ val*0.5,0,1);
+          break;
+        }
+        case "release":{
+          let base= TRACK_TYPES[track.type].release;
+          track.release= clamp(base+ val*1,0.01,5);
+          break;
+        }
+      }
+    }
+
+    /******************************************************
+     * BUILD UI
+     ******************************************************/
+    function buildUI(){
+      // Root/Scale
+      let rootSel=document.getElementById("rootNoteSelect");
+      NOTE_NAMES.forEach((nm,idx)=>{
+        let opt=document.createElement("option");
+        opt.value=idx; opt.textContent=nm;
+        rootSel.appendChild(opt);
+      });
+      rootSel.value=0;
+      rootSel.addEventListener("change",()=>scaleRoot=parseInt(rootSel.value,10));
+
+      let scaleSel=document.getElementById("scaleTypeSelect");
+      Object.keys(SCALE_PATTERNS).forEach(sk=>{
+        let opt=document.createElement("option");
+        opt.value=sk; opt.textContent=sk;
+        scaleSel.appendChild(opt);
+      });
+      scaleSel.value="Major";
+      scaleSel.addEventListener("change",()=> scaleType= scaleSel.value);
+
+      // Create 4 track modules
+      let container=document.getElementById("trackContainer");
+      for(let i=0;i<4;i++){
+        let track=createTrack(i);
+        initTrackSteps(track);
+        tracks.push(track);
+
+        // build UI
+        let modDiv=document.createElement("div");
+        modDiv.className="module";
+
+        let title=document.createElement("h2");
+        title.textContent="Track "+(i+1);
+        modDiv.appendChild(title);
+
+        // Mute / Solo
+        let ctrlDiv=document.createElement("div");
+        ctrlDiv.className="track-controls";
+        let muteBtn=document.createElement("button");
+        muteBtn.textContent="Mute";
+        muteBtn.addEventListener("click",()=>{
+          track.muted=!track.muted;
+          if(track.muted) {
+            track.solo=false; // disable solo if it was on
+            muteBtn.textContent="Unmute";
+          } else {
+            muteBtn.textContent="Mute";
+          }
+          updateMuteSolo();
+        });
+        ctrlDiv.appendChild(muteBtn);
+
+        let soloBtn=document.createElement("button");
+        soloBtn.textContent="Solo";
+        soloBtn.addEventListener("click",()=>{
+          track.solo=!track.solo;
+          if(track.solo){
+            track.muted=false; // disable mute if it was on
+            soloBtn.textContent="Uns. (Solo)";
+          } else {
+            soloBtn.textContent="Solo";
+          }
+          updateMuteSolo();
+        });
+        ctrlDiv.appendChild(soloBtn);
+        modDiv.appendChild(ctrlDiv);
+
+        // Track Type
+        let typeRow=document.createElement("label");
+        typeRow.textContent="Type: ";
+        let typeSel=document.createElement("select");
+        ["BD","Bass","Snare","Hihat"].forEach(tt=>{
+          let opt=document.createElement("option");
+          opt.value=tt; opt.textContent=tt;
+          typeSel.appendChild(opt);
+        });
+        typeSel.value="BD";
+        typeSel.addEventListener("change",()=>{
+          track.type=typeSel.value;
+          let def=TRACK_TYPES[track.type];
+          Object.assign(track, JSON.parse(JSON.stringify(def)));
+          updateParamSliders(modDiv, track);
+          rebuildStepGrid(track, stepGrid);
+        });
+        typeRow.appendChild(typeSel);
+        modDiv.appendChild(typeRow);
+
+        // Step Length
+        let stepLenRow=document.createElement("label");
+        stepLenRow.textContent="Steps (1-64): ";
+        let stepLenSel=document.createElement("select");
+        for(let s=1;s<=64;s++){
+          let opt=document.createElement("option");
+          opt.value=s; opt.textContent=s;
+          stepLenSel.appendChild(opt);
+        }
+        stepLenSel.value="16";
+        stepLenSel.addEventListener("change",()=>{
+          track.stepLength=parseInt(stepLenSel.value,10);
+          rebuildStepGrid(track, stepGrid);
+        });
+        stepLenRow.appendChild(stepLenSel);
+        modDiv.appendChild(stepLenRow);
+
+        // Step Grid
+        let stepGrid=document.createElement("div");
+        stepGrid.className="step-grid";
+        modDiv.appendChild(stepGrid);
+        rebuildStepGrid(track, stepGrid);
+
+        // Param Section
+        let paramSec=document.createElement("div");
+        paramSec.className="param-section";
+        let pTitle=document.createElement("h4");
+        pTitle.textContent="Sound Parameters";
+        paramSec.appendChild(pTitle);
+
+        paramSec.appendChild(createParamSlider("Pitch", 0,127, track.pitch, v=>{
+          track.pitch= quantizePitch(v);
+        }));
+        paramSec.appendChild(createParamSlider("Timbre",0,100, track.timbre,v=>track.timbre=v));
+        paramSec.appendChild(createParamSlider("Filter Freq",50,10000, track.filterFreq,v=>track.filterFreq=v,true,1));
+        paramSec.appendChild(createParamSlider("Filter Res",0.1,20, track.filterRes,v=>track.filterRes=v,true,0.1));
+
+        paramSec.appendChild(createParamSlider("Attack",0,1, track.attack,v=>track.attack=v,true,0.01));
+        paramSec.appendChild(createParamSlider("Decay",0.01,2, track.decay,v=>track.decay=v,true,0.01));
+        paramSec.appendChild(createParamSlider("Sustain",0,1, track.sustain,v=>track.sustain=v,true,0.01));
+        paramSec.appendChild(createParamSlider("Release",0.01,5, track.release,v=>track.release=v,true,0.01));
+
+        // If type is Hihat, we might show "hat dryness" or "metal factor" etc.
+        // For brevity, let's rely on 'timbre' as "metal factor." 
+        // You could add more if you want.
+
+        modDiv.appendChild(paramSec);
+
+        // LFO Section
+        let lfoSec=document.createElement("div");
+        lfoSec.className="lfo-section";
+        let lfoTitle=document.createElement("h4");
+        lfoTitle.textContent="Channel LFO";
+        lfoSec.appendChild(lfoTitle);
+
+        let lfoOnLabel=document.createElement("label");
+        lfoOnLabel.textContent="Enable LFO: ";
+        let lfoOnCb=document.createElement("input");
+        lfoOnCb.type="checkbox";
+        lfoOnCb.addEventListener("change",()=>{
+          track.lfoOn=lfoOnCb.checked;
+        });
+        lfoOnLabel.appendChild(lfoOnCb);
+        lfoSec.appendChild(lfoOnLabel);
+
+        lfoSec.appendChild(createParamSlider("LFO Freq",0.1,20, track.lfoFreq,(v)=>{
+          track.lfoFreq=v;
+          if(track.lfoNode) track.lfoNode.frequency.value= v;
+        },true,0.1));
+
+        lfoSec.appendChild(createParamSlider("LFO Depth",0,1, track.lfoDepth,(v)=>{
+          track.lfoDepth=v;
+        },true,0.01));
+
+        let lfoTypeLabel=document.createElement("label");
+        lfoTypeLabel.textContent="LFO Wave: ";
+        let lfoTypeSel=document.createElement("select");
+        ["sine","square","triangle","sawtooth","random"].forEach(w=>{
+          let opt=document.createElement("option");
+          opt.value=w; opt.textContent=w;
+          lfoTypeSel.appendChild(opt);
+        });
+        lfoTypeSel.value=track.lfoType;
+        lfoTypeSel.addEventListener("change",()=>{
+          track.lfoType=lfoTypeSel.value;
+          if(track.lfoNode && track.lfoType!=="random"){
+            track.lfoNode.type= track.lfoType;
+          }
+        });
+        lfoTypeLabel.appendChild(lfoTypeSel);
+        lfoSec.appendChild(lfoTypeLabel);
+
+        let lfoTargetLabel=document.createElement("label");
+        lfoTargetLabel.textContent="LFO Target: ";
+        let lfoTargetSel=document.createElement("select");
+        ["pitch","timbre","filter","resonance","attack","decay","sustain","release"]
+          .forEach(tg=>{
+            let opt=document.createElement("option");
+            opt.value=tg; opt.textContent=tg;
+            lfoTargetSel.appendChild(opt);
+          });
+        lfoTargetSel.value=track.lfoTarget;
+        lfoTargetSel.addEventListener("change",()=>{
+          track.lfoTarget=lfoTargetSel.value;
+        });
+        lfoTargetLabel.appendChild(lfoTargetSel);
+        lfoSec.appendChild(lfoTargetLabel);
+
+        modDiv.appendChild(lfoSec);
+
+        // Random Button
+        let randBtn=document.createElement("button");
+        randBtn.textContent="Randomize Track";
+        randBtn.addEventListener("click",()=>{
+          randomizeTrack(track, typeSel, stepLenSel, modDiv);
+        });
+        modDiv.appendChild(randBtn);
+
+        container.appendChild(modDiv);
+      }
+    }
+
+    function initTrackSteps(track){
+      track.steps=[];
+      for(let i=0;i<64;i++){
+        track.steps.push({
+          on:false,
+          prob:1.0,
+          stepVolume:1.0,  // new volume slider
+          stepPitch: track.type==="bass"? track.pitch : track.pitch,
+          moduloEnabled:false,
+          moduloCount:2,
+          moduloOffset:0
+        });
+      }
+    }
+
+    function rebuildStepGrid(track, stepGrid){
+      // Clear
+      while(stepGrid.firstChild) stepGrid.removeChild(stepGrid.firstChild);
+      let cols=(track.stepLength>16)? track.stepLength:16;
+      stepGrid.style.gridTemplateColumns=`repeat(${cols},1fr)`;
+
+      for(let i=0;i<track.stepLength;i++){
+        let stepObj= track.steps[i];
+        let stepDiv=document.createElement("div");
+        stepDiv.className="step";
+
+        // On/Off
+        let cb=document.createElement("input");
+        cb.type="checkbox";
+        cb.checked= stepObj.on;
+        cb.addEventListener("change",()=> stepObj.on=cb.checked);
+        stepDiv.appendChild(cb);
+
+        // Probability
+        let probSlider=document.createElement("input");
+        probSlider.type="range";
+        probSlider.min=0; probSlider.max=1; probSlider.step=0.01;
+        probSlider.value= stepObj.prob;
+        probSlider.style.width="35px";
+        probSlider.addEventListener("input",()=>stepObj.prob=parseFloat(probSlider.value));
+        stepDiv.appendChild(probSlider);
+
+        // Volume
+        let volSlider=document.createElement("input");
+        volSlider.type="range";
+        volSlider.min=0; volSlider.max=1; volSlider.step=0.01;
+        volSlider.value= stepObj.stepVolume;
+        volSlider.style.width="35px";
+        volSlider.addEventListener("input",()=> stepObj.stepVolume=parseFloat(volSlider.value));
+        stepDiv.appendChild(volSlider);
+
+        // If Bass, we show per-step pitch slider
+        if(track.generator==="bass"){
+          let pitchSel=document.createElement("input");
+          pitchSel.type="range";
+          pitchSel.min=36; pitchSel.max=84; pitchSel.step=1;
+          pitchSel.value= stepObj.stepPitch || 60;
+          pitchSel.style.width="35px";
+          pitchSel.title="Per-step pitch (quantized)";
+          pitchSel.addEventListener("input",()=>{
+            let val=parseInt(pitchSel.value,10);
+            stepObj.stepPitch= quantizePitch(val);
+          });
+          stepDiv.appendChild(pitchSel);
+        }
+
+        // Modulo toggle
+        let modCb=document.createElement("input");
+        modCb.type="checkbox";
+        modCb.checked= stepObj.moduloEnabled;
+        modCb.title="Enable modulo logic";
+        modCb.addEventListener("change",()=> stepObj.moduloEnabled=modCb.checked);
+        stepDiv.appendChild(modCb);
+
+        // Mod count
+        let modCount=document.createElement("input");
+        modCount.type="number";
+        modCount.min=1; modCount.max=16;
+        modCount.value= stepObj.moduloCount;
+        modCount.style.width="30px";
+        modCount.title="Modulo count";
+        modCount.addEventListener("change",()=> stepObj.moduloCount=parseInt(modCount.value,10));
+        stepDiv.appendChild(modCount);
+
+        // Mod offset
+        let modOff=document.createElement("input");
+        modOff.type="number";
+        modOff.min=0; modOff.max=15;
+        modOff.value= stepObj.moduloOffset;
+        modOff.style.width="30px";
+        modOff.title="Modulo offset";
+        modOff.addEventListener("change",()=> stepObj.moduloOffset=parseInt(modOff.value,10));
+        stepDiv.appendChild(modOff);
+
+        stepGrid.appendChild(stepDiv);
+      }
+    }
+
+    function createParamSlider(labelText,minVal,maxVal,initial,callback,isFloat=false,step=1){
+      let container=document.createElement("label");
+      container.textContent=labelText+": ";
+      let slider=document.createElement("input");
+      slider.type="range";
+      slider.min=minVal; slider.max=maxVal; slider.step=step;
+      slider.value=initial;
+      slider.addEventListener("input",(e)=>{
+        let v=isFloat? parseFloat(e.target.value): parseInt(e.target.value,10);
+        callback(v);
+      });
+      container.appendChild(slider);
+      return container;
+    }
+
+    function updateParamSliders(trackDiv, track){
+      let rangeEls= trackDiv.querySelectorAll(".param-section input[type='range']");
+      rangeEls.forEach(r=>{
+        let lbl=r.parentElement.textContent.toLowerCase();
+        if(lbl.includes("pitch"))       r.value=track.pitch;
+        else if(lbl.includes("timbre")) r.value=track.timbre;
+        else if(lbl.includes("freq"))   r.value=track.filterFreq;
+        else if(lbl.includes("res"))    r.value=track.filterRes;
+        else if(lbl.includes("attack")) r.value=track.attack;
+        else if(lbl.includes("decay"))  r.value=track.decay;
+        else if(lbl.includes("sustain"))r.value=track.sustain;
+        else if(lbl.includes("release"))r.value=track.release;
+      });
+    }
+
+    /******************************************************
+     * RANDOMIZE TRACK
+     ******************************************************/
+    function randomizeTrack(track, typeSel, stepLenSel, trackDiv){
+      const types=["BD","Bass","Snare","Hihat"];
+      let randType= types[Math.floor(Math.random()*types.length)];
+      track.type=randType;
+      typeSel.value=randType;
+      let def= TRACK_TYPES[randType];
+      Object.assign(track, JSON.parse(JSON.stringify(def)));
+      // random offsets
+      track.pitch= quantizePitch( clamp(def.pitch+(Math.random()*24-12),0,127) );
+      track.timbre= clamp(def.timbre+(Math.random()*60-30),0,100);
+      track.attack= clamp(def.attack+Math.random()*0.1,0,1);
+      track.decay= clamp(def.decay+Math.random()*0.5,0.01,2);
+      track.sustain= clamp(def.sustain+Math.random()*0.5,0,1);
+      track.release= clamp(def.release+Math.random()*1,0.01,5);
+      track.filterFreq= clamp(def.filterFreq+Math.random()*3000,50,10000);
+      track.filterRes= clamp(def.filterRes+Math.random()*10,0.1,20);
+
+      // stepLength
+      let randLen=Math.floor(Math.random()*64)+1;
+      track.stepLength=randLen;
+      stepLenSel.value=randLen;
+
+      // random steps
+      for(let i=0;i<64;i++){
+        track.steps[i].on=(Math.random()>0.5);
+        track.steps[i].prob=Math.random();
+        track.steps[i].stepVolume=Math.random()*1;
+        track.steps[i].moduloEnabled=(Math.random()>0.7);
+        track.steps[i].moduloCount=Math.floor(Math.random()*4)+1;
+        track.steps[i].moduloOffset=Math.floor(Math.random()*track.steps[i].moduloCount);
+        if(randType==="Bass"){
+          let pv= clamp(36+Math.floor(Math.random()*49),36,84);
+          track.steps[i].stepPitch=quantizePitch(pv);
+        }
+      }
+      updateParamSliders(trackDiv, track);
+      let stepGrid= trackDiv.querySelector(".step-grid");
+      rebuildStepGrid(track, stepGrid);
+    }
+
+    /******************************************************
+     * MUTE / SOLO LOGIC
+     ******************************************************/
+    function updateMuteSolo(){
+      // check if any track is solo
+      let anySolo= tracks.some(t=>t.solo);
+      tracks.forEach(t=>{
+        if(anySolo){
+          // if track is solo, gain=1, else gain=0
+          if(t.solo) t.trackGainNode.gain.value= t.muted?0:1;
+          else t.trackGainNode.gain.value=0; 
+        } else {
+          // no solo, if track is muted, gain=0 else gain=1
+          t.trackGainNode.gain.value= t.muted?0:1;
+        }
+      });
+    }
+
+    /******************************************************
+     * CROSSFADER LOGIC
+     * 1) userState vs randomState for track parameters
+     * 2) userFXState vs randomFXState for FX chain
+     ******************************************************/
+    function captureUserState(){
+      userState= tracks.map(t=>({
+        pitch: t.pitch,
+        timbre: t.timbre,
+        attack: t.attack,
+        decay: t.decay,
+        sustain: t.sustain,
+        release: t.release,
+        filterFreq: t.filterFreq,
+        filterRes: t.filterRes
+      }));
+    }
+    function generateRandomState(){
+      randomState= tracks.map(t=>{
+        return {
+          pitch: quantizePitch( clamp(t.pitch+(Math.random()*24-12),0,127) ),
+          timbre: clamp(t.timbre+(Math.random()*60-30),0,100),
+          attack: clamp(t.attack+(Math.random()*0.1),0,1),
+          decay: clamp(t.decay+(Math.random()*0.5),0.01,2),
+          sustain: clamp(t.sustain+(Math.random()*0.5),0,1),
+          release: clamp(t.release+(Math.random()*1),0.01,5),
+          filterFreq: clamp(t.filterFreq+(Math.random()*3000),50,10000),
+          filterRes: clamp(t.filterRes+(Math.random()*10),0.1,20)
+        };
+      });
+    }
+    function applyCrossfade(val){
+      if(!userState || !randomState) return;
+      for(let i=0;i<tracks.length;i++){
+        let t=tracks[i];
+        let u=userState[i];
+        let r=randomState[i];
+        t.pitch      = quantizePitch( lerp(u.pitch, r.pitch, val) );
+        t.timbre     = lerp(u.timbre, r.timbre, val);
+        t.attack     = lerp(u.attack, r.attack, val);
+        t.decay      = lerp(u.decay, r.decay, val);
+        t.sustain    = lerp(u.sustain, r.sustain, val);
+        t.release    = lerp(u.release, r.release, val);
+        t.filterFreq = lerp(u.filterFreq, r.filterFreq, val);
+        t.filterRes  = lerp(u.filterRes, r.filterRes, val);
+      }
+    }
+    function lerp(a,b,t){return a+(b-a)*t;}
+
+    // FX Crossfader
+    function captureFXState(){
+      userFXState= {
+        distortion: parseFloat(document.getElementById("distortionAmount").value),
+        delayTime: parseFloat(document.getElementById("delayTime").value),
+        delayFeedback: parseFloat(document.getElementById("delayFeedback").value),
+        spectralFreq: parseFloat(document.getElementById("spectralFreq").value)
+      };
+    }
+    function generateRandomFXState(){
+      randomFXState= {
+        distortion: Math.random(), 
+        delayTime: Math.random(), 
+        delayFeedback: Math.random()*0.95, 
+        spectralFreq: 100+ Math.random()*7900
+      };
+    }
+    function applyFXCrossfade(val){
+      if(!userFXState || !randomFXState) return;
+      let d= lerp(userFXState.distortion, randomFXState.distortion, val);
+      let dt= lerp(userFXState.delayTime, randomFXState.delayTime, val);
+      let df= lerp(userFXState.delayFeedback, randomFXState.delayFeedback, val);
+      let sp= lerp(userFXState.spectralFreq, randomFXState.spectralFreq, val);
+
+      // apply to actual nodes & sliders
+      document.getElementById("distortionAmount").value=d;
+      setDistortionCurve(d);
+      let dNode= document.getElementById("delayTime");
+      dNode.value= dt;
+      if(delayNode) delayNode.delayTime.value= dt*1.5;
+
+      let dfNode= document.getElementById("delayFeedback");
+      dfNode.value= df;
+      if(delayFeedbackGain) delayFeedbackGain.gain.value=df;
+
+      let spNode= document.getElementById("spectralFreq");
+      spNode.value= sp;
+      if(spectralFilter) spectralFilter.frequency.value=sp;
+    }
+
+    /******************************************************
+     * INIT & EVENT HOOKS
+     ******************************************************/
+    function init(){
+      buildUI();
+
+      let tempoSlider=document.getElementById("tempoSlider");
+      let tempoVal=document.getElementById("tempoValue");
+      bpm=parseInt(tempoSlider.value,10);
+      tempoSlider.addEventListener("input",()=>{
+        bpm=parseInt(tempoSlider.value,10);
+        tempoVal.textContent=bpm;
+      });
+
+      let masterVol=document.getElementById("masterVolume");
+      masterVol.addEventListener("input",(e)=>{
+        if(masterGain) masterGain.gain.value=parseFloat(e.target.value);
+      });
+
+      let swingSlider=document.getElementById("swingSlider");
+      let swingVal=document.getElementById("swingValue");
+      swingSlider.addEventListener("input",()=>{
+        swing=parseFloat(swingSlider.value);
+        swingVal.textContent=swing.toFixed(2);
+      });
+
+      let startStopBtn=document.getElementById("startStopBtn");
+      startStopBtn.addEventListener("click",()=>{
+        if(!isPlaying){
+          startStopBtn.textContent="Stop";
+          startEngine();
+          captureUserState();
+          captureFXState();
+        } else {
+          startStopBtn.textContent="Start";
+          stopEngine();
+        }
+      });
+
+      // Master FX
+      bindMasterFX();
+
+      // Track Crossfader
+      let randBtn=document.getElementById("randomStateBtn");
+      randBtn.addEventListener("click",()=>{
+        captureUserState();
+        generateRandomState();
+      });
+      let crossfadeSlider=document.getElementById("crossfadeSlider");
+      crossfadeSlider.addEventListener("input",(e)=>{
+        let val=parseFloat(e.target.value);
+        applyCrossfade(val);
+      });
+
+      // FX Crossfader
+      let randFXBtn=document.getElementById("randomFXStateBtn");
+      randFXBtn.addEventListener("click",()=>{
+        captureFXState();
+        generateRandomFXState();
+      });
+      let fxCrossfadeSlider=document.getElementById("fxCrossfadeSlider");
+      fxCrossfadeSlider.addEventListener("input",(e)=>{
+        let val=parseFloat(e.target.value);
+        applyFXCrossfade(val);
+      });
+    }
+
+    function bindMasterFX(){
+      document.getElementById("distortionAmount").addEventListener("input",(e)=>{
+        let val=parseFloat(e.target.value);
+        setDistortionCurve(val);
+      });
+      document.getElementById("delayTime").addEventListener("input",(e)=>{
+        if(!delayNode)return;
+        delayNode.delayTime.value=parseFloat(e.target.value)*1.5;
+      });
+      document.getElementById("delayFeedback").addEventListener("input",(e)=>{
+        if(!delayFeedbackGain)return;
+        delayFeedbackGain.gain.value=parseFloat(e.target.value);
+      });
+      document.getElementById("spectralFreq").addEventListener("input",(e)=>{
+        if(!spectralFilter)return;
+        spectralFilter.frequency.value=parseFloat(e.target.value);
+      });
+    }
+
+    window.onload=init;
+  </script>
+</body>
+</html>
